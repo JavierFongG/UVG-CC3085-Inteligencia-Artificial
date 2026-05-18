@@ -104,7 +104,7 @@ export default function DashboardPage() {
                     {index + 1}. {standing.playerName}
                   </div>
                   <div className="text-sm text-muted-foreground">
-                    {standing.wins}W / {standing.losses}L / {standing.draws}D
+                    {standing.wins}W / {standing.draws}D / {standing.losses}L
                   </div>
                 </div>
                 <div className="text-lg font-semibold">{standing.score}</div>

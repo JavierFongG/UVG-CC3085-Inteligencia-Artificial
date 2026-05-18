@@ -12,8 +12,8 @@ export function StandingsTable({ standings }: { standings: Standing[] }) {
           <TableHead>Player</TableHead>
           <TableHead>Score</TableHead>
           <TableHead>W</TableHead>
-          <TableHead>L</TableHead>
           <TableHead>D</TableHead>
+          <TableHead>L</TableHead>
           <TableHead>Byes</TableHead>
           <TableHead>Disc Diff</TableHead>
         </TableRow>
@@ -25,8 +25,8 @@ export function StandingsTable({ standings }: { standings: Standing[] }) {
             <TableCell>{standing.playerName}</TableCell>
             <TableCell>{standing.score}</TableCell>
             <TableCell>{standing.wins}</TableCell>
-            <TableCell>{standing.losses}</TableCell>
             <TableCell>{standing.draws}</TableCell>
+            <TableCell>{standing.losses}</TableCell>
             <TableCell>{standing.byes}</TableCell>
             <TableCell>{standing.discDifferential ?? "—"}</TableCell>
           </TableRow>

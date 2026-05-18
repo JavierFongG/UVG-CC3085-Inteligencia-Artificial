@@ -32,6 +32,9 @@ from server.schemas import IncomingMove
 logger = logging.getLogger(__name__)
 
 FINAL_GAME_STATUSES = {"completed", "forfeit", "forced_end"}
+WIN_POINTS = 3.0
+DRAW_POINTS = 1.0
+BYE_POINTS = 1.0
 
 
 @dataclass(slots=True)
@@ -518,12 +521,11 @@ class TournamentManager:
                         raise HTTPException(status_code=404, detail="No tournament found")
                     tournament = completed
 
-            standings = session.exec(
-                select(Standing, Player)
-                .join(Player, Player.id == Standing.player_id)
-                .where(Standing.tournament_id == tournament.id)
-                .order_by(Standing.points.desc(), Standing.player_id)
-            ).all()
+            if self._reconcile_tournament_results(session, tournament.id):
+                session.commit()
+
+            differential = self._disc_differential_for_tournament(session, tournament.id)
+            standings = self._sorted_standings_with_players(session, tournament.id, differential)
             return tournament.id, [
                 {
                     "player_id": standing.player_id,
@@ -548,6 +550,8 @@ class TournamentManager:
 
     def get_tournament_detail(self, tournament_id: int) -> dict[str, Any]:
         with self.session_factory() as session:
+            if self._reconcile_tournament_results(session, tournament_id):
+                session.commit()
             return self._serialize_tournament_detail(session, tournament_id)
 
     def get_round_detail(self, round_id: int) -> dict[str, Any]:
@@ -711,13 +715,11 @@ class TournamentManager:
             if tournament is None:
                 return []
 
-            standings = session.exec(
-                select(Standing, Player)
-                .join(Player, Player.id == Standing.player_id)
-                .where(Standing.tournament_id == tournament.id)
-                .order_by(Standing.points.desc(), Standing.player_id)
-            ).all()
+            if self._reconcile_tournament_results(session, tournament.id):
+                session.commit()
+
             differential = self._disc_differential_for_tournament(session, tournament.id)
+            standings = self._sorted_standings_with_players(session, tournament.id, differential)
             return [
                 {
                     "rank": index + 1,
@@ -1055,7 +1057,7 @@ class TournamentManager:
         ).first()
         if standing is None:
             return
-        standing.points += 1.0
+        standing.points += BYE_POINTS
         standing.byes += 1
         session.add(standing)
         session.add(
@@ -1065,7 +1067,7 @@ class TournamentManager:
                 player_id=player_id,
                 opponent_player_id=None,
                 game_id=None,
-                points_awarded=1.0,
+                points_awarded=BYE_POINTS,
                 outcome="bye",
             )
         )
@@ -1125,7 +1127,8 @@ class TournamentManager:
                 game.loser_player_id = game.black_player_id
 
             session.add(game)
-            self._apply_result_to_standings(session, game, result)
+            self._record_round_results_for_game(session, game, result)
+            self._recalculate_standings(session, game.tournament_id)
             session.commit()
 
             tournament_id = game.tournament_id
@@ -1171,7 +1174,8 @@ class TournamentManager:
             game.white_score = white_score
             game.finished_at = utc_now()
             session.add(game)
-            self._apply_result_to_standings(session, game, result)
+            self._record_round_results_for_game(session, game, result)
+            self._recalculate_standings(session, game.tournament_id)
             session.commit()
 
             tournament_id = game.tournament_id
@@ -1185,39 +1189,38 @@ class TournamentManager:
         self._update_round_if_complete(tournament_id, round_number)
         await self._broadcast_admin_event({"type": "tournament_update", "tournamentId": tournament_id, "status": "active"})
 
-    def _apply_result_to_standings(self, session: Session, game: Game, result: str) -> None:
-        existing = session.exec(select(RoundResult).where(Game.id == RoundResult.game_id, RoundResult.player_id == game.black_player_id)).first()
-        if existing is not None:
-            return
-
-        black_standing = session.exec(
-            select(Standing).where(Standing.tournament_id == game.tournament_id, Standing.player_id == game.black_player_id)
+    def _ensure_standing_exists(self, session: Session, tournament_id: int, player_id: int) -> None:
+        standing = session.exec(
+            select(Standing).where(Standing.tournament_id == tournament_id, Standing.player_id == player_id)
         ).first()
-        white_standing = session.exec(
-            select(Standing).where(Standing.tournament_id == game.tournament_id, Standing.player_id == game.white_player_id)
-        ).first()
-        if black_standing is None or white_standing is None:
-            return
+        if standing is None:
+            session.add(Standing(tournament_id=tournament_id, player_id=player_id))
 
+    def _points_for_result(self, result: str) -> tuple[float, float]:
         if result == "black_win":
-            black_standing.points += 1.0
-            black_standing.wins += 1
-            white_standing.losses += 1
-            black_points, white_points = 1.0, 0.0
-        elif result == "white_win":
-            white_standing.points += 1.0
-            white_standing.wins += 1
-            black_standing.losses += 1
-            black_points, white_points = 0.0, 1.0
-        else:
-            black_standing.points += 0.5
-            white_standing.points += 0.5
-            black_standing.draws += 1
-            white_standing.draws += 1
-            black_points = white_points = 0.5
+            return WIN_POINTS, 0.0
+        if result == "white_win":
+            return 0.0, WIN_POINTS
+        return DRAW_POINTS, DRAW_POINTS
 
-        session.add(black_standing)
-        session.add(white_standing)
+    def _record_round_results_for_game(self, session: Session, game: Game, result: str) -> None:
+        existing = session.exec(select(RoundResult).where(RoundResult.game_id == game.id)).all()
+        black_points, white_points = self._points_for_result(result)
+        expected_rows = {
+            (game.black_player_id, game.white_player_id, black_points, result),
+            (game.white_player_id, game.black_player_id, white_points, result),
+        }
+        existing_rows = {
+            (row.player_id, row.opponent_player_id, row.points_awarded, row.outcome)
+            for row in existing
+        }
+        if len(existing) == 2 and existing_rows == expected_rows:
+            return
+        for row in existing:
+            session.delete(row)
+
+        self._ensure_standing_exists(session, game.tournament_id, game.black_player_id)
+        self._ensure_standing_exists(session, game.tournament_id, game.white_player_id)
         session.add(
             RoundResult(
                 tournament_id=game.tournament_id,
@@ -1314,13 +1317,8 @@ class TournamentManager:
         return summary
 
     def list_admin_standings_for_tournament(self, session: Session, tournament_id: int) -> list[dict[str, Any]]:
-        standings = session.exec(
-            select(Standing, Player)
-            .join(Player, Player.id == Standing.player_id)
-            .where(Standing.tournament_id == tournament_id)
-            .order_by(Standing.points.desc(), Standing.player_id)
-        ).all()
         differential = self._disc_differential_for_tournament(session, tournament_id)
+        standings = self._sorted_standings_with_players(session, tournament_id, differential)
         return [
             {
                 "rank": index + 1,
@@ -1498,12 +1496,51 @@ class TournamentManager:
         }
 
     def _disc_differential_for_tournament(self, session: Session, tournament_id: int) -> dict[int, int]:
-        games = session.exec(select(Game).where(Game.tournament_id == tournament_id)).all()
+        games = session.exec(select(Game).where(Game.tournament_id == tournament_id, Game.status.in_(FINAL_GAME_STATUSES))).all()
         differential: dict[int, int] = {}
         for game in games:
             differential[game.black_player_id] = differential.get(game.black_player_id, 0) + (game.black_score - game.white_score)
             differential[game.white_player_id] = differential.get(game.white_player_id, 0) + (game.white_score - game.black_score)
         return differential
+
+    def _reconcile_tournament_results(self, session: Session, tournament_id: int) -> bool:
+        changed = False
+        games = session.exec(select(Game).where(Game.tournament_id == tournament_id, Game.status.in_(FINAL_GAME_STATUSES))).all()
+        for game in games:
+            if game.result is None:
+                continue
+            existing = session.exec(select(RoundResult).where(RoundResult.game_id == game.id)).all()
+            black_points, white_points = self._points_for_result(game.result)
+            expected_rows = {
+                (game.black_player_id, game.white_player_id, black_points, game.result),
+                (game.white_player_id, game.black_player_id, white_points, game.result),
+            }
+            existing_rows = {
+                (row.player_id, row.opponent_player_id, row.points_awarded, row.outcome)
+                for row in existing
+            }
+            if len(existing) == 2 and existing_rows == expected_rows:
+                continue
+            self._record_round_results_for_game(session, game, game.result)
+            changed = True
+
+        if changed:
+            self._recalculate_standings(session, tournament_id)
+        return changed
+
+    def _sorted_standings_with_players(
+        self, session: Session, tournament_id: int, differential: dict[int, int] | None = None
+    ) -> list[tuple[Standing, Player]]:
+        standings = session.exec(
+            select(Standing, Player)
+            .join(Player, Player.id == Standing.player_id)
+            .where(Standing.tournament_id == tournament_id)
+        ).all()
+        differential = differential or {}
+        return sorted(
+            standings,
+            key=lambda row: (-row[0].points, -differential.get(row[0].player_id, 0), row[0].player_id),
+        )
 
     def _remaining_ms_for_game(self, game_id: str) -> int | None:
         for turn in self.turns_by_player.values():
@@ -1627,7 +1664,7 @@ class TournamentManager:
                 standing.byes += 1
             elif result.outcome == "draw":
                 standing.draws += 1
-            elif result.points_awarded == 1.0:
+            elif result.points_awarded == WIN_POINTS:
                 standing.wins += 1
             else:
                 standing.losses += 1

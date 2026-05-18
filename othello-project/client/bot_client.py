@@ -54,10 +54,18 @@ class BotClient:
             message_type = payload.get("type")
 
             if message_type == "your_turn":
+                color = payload["color"]
+                legal_moves = payload["legal_moves"]
+                logger.info(
+                    "Your turn in game %s: playing as %s with %s legal move(s)",
+                    payload["game_id"],
+                    color,
+                    len(legal_moves),
+                )
                 move = await self._choose_move(
                     payload["board"],
-                    payload["color"],
-                    payload["legal_moves"],
+                    color,
+                    legal_moves,
                 )
                 await websocket.send(
                     json.dumps(
@@ -68,7 +76,7 @@ class BotClient:
                         }
                     )
                 )
-                logger.info("Submitted move %s for game %s", move, payload["game_id"])
+                logger.info("Submitted move %s for game %s as %s", move, payload["game_id"], color)
             elif message_type == "game_update":
                 logger.info(
                     "Game %s updated: next_player=%s last_move=%s",

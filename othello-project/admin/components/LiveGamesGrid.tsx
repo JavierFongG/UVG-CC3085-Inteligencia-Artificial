@@ -15,7 +15,7 @@ export function LiveGamesGrid({ games }: Props) {
   const [statusFilter, setStatusFilter] = useState("all");
   const [roundFilter, setRoundFilter] = useState("");
   const [tournamentFilter, setTournamentFilter] = useState("");
-  const [sortBy, setSortBy] = useState("recent");
+  const [sortBy, setSortBy] = useState("fixed");
   const [mode, setMode] = useState<"compact" | "expanded">("compact");
 
   const filtered = useMemo(() => {
@@ -32,19 +32,36 @@ export function LiveGamesGrid({ games }: Props) {
       return true;
     });
 
+    const compareFixedOrder = (left: GameSummary, right: GameSummary) => {
+      const tournamentOrder = (left.tournamentId ?? 0).toString().localeCompare((right.tournamentId ?? 0).toString(), undefined, { numeric: true });
+      if (tournamentOrder !== 0) {
+        return tournamentOrder;
+      }
+
+      const roundOrder = (left.roundNumber ?? 0) - (right.roundNumber ?? 0);
+      if (roundOrder !== 0) {
+        return roundOrder;
+      }
+
+      return left.id.localeCompare(right.id, undefined, { numeric: true });
+    };
+
     result.sort((left, right) => {
       if (sortBy === "timer") {
-        return (left.countdownMs ?? Number.MAX_SAFE_INTEGER) - (right.countdownMs ?? Number.MAX_SAFE_INTEGER);
+        const timerOrder = (left.countdownMs ?? Number.MAX_SAFE_INTEGER) - (right.countdownMs ?? Number.MAX_SAFE_INTEGER);
+        return timerOrder !== 0 ? timerOrder : compareFixedOrder(left, right);
       }
       if (sortBy === "score_diff") {
         const leftDiff = Math.abs((left.blackScore ?? 0) - (left.whiteScore ?? 0));
         const rightDiff = Math.abs((right.blackScore ?? 0) - (right.whiteScore ?? 0));
-        return rightDiff - leftDiff;
+        const diffOrder = rightDiff - leftDiff;
+        return diffOrder !== 0 ? diffOrder : compareFixedOrder(left, right);
       }
       if (sortBy === "round") {
-        return (left.roundNumber ?? 0) - (right.roundNumber ?? 0);
+        const roundOrder = (left.roundNumber ?? 0) - (right.roundNumber ?? 0);
+        return roundOrder !== 0 ? roundOrder : compareFixedOrder(left, right);
       }
-      return new Date(right.updatedAt ?? 0).getTime() - new Date(left.updatedAt ?? 0).getTime();
+      return compareFixedOrder(left, right);
     });
 
     return result;
@@ -73,7 +90,7 @@ export function LiveGamesGrid({ games }: Props) {
         <Input placeholder="Tournament ID" value={tournamentFilter} onChange={(e) => setTournamentFilter(e.target.value)} />
         <Input placeholder="Round" value={roundFilter} onChange={(e) => setRoundFilter(e.target.value)} />
         <select className="h-10 rounded-md border bg-card px-3 text-sm" value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
-          <option value="recent">Most recent move</option>
+          <option value="fixed">Fixed board order</option>
           <option value="timer">Lowest remaining time</option>
           <option value="score_diff">Board score difference</option>
           <option value="round">Round number</option>
